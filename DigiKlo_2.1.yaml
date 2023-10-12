@@ -1,0 +1,288 @@
+esphome:
+  name: digiklo
+  friendly_name: DigiKlo
+  on_boot:
+    priority: 800
+    then: 
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Fertig initialisiert";'
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+
+api:
+  encryption:
+    key: "7soGemDc4Z1TTU0gjyVtVpsgpPCJo12v9xQsE7+5Nxk="
+
+ota:
+  password: "162b5aab38788rtfdh8298412018ee6a4"
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "DigiKlo Fallback Hotspot"
+    password: "VHASfNmTfZmD"
+
+captive_portal:
+
+
+# Zeitsteuerung    
+time: 
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      # Alle 2 Stunden rühren
+      - seconds: 0
+        minutes: 0
+        hours: /2
+        then:
+          - text_sensor.template.publish:
+              id: info_spuelprogramm
+              state: !lambda 'return "Automatisches Rühren...";'
+          -  delay: 3s
+          - script.execute: ruehrwerk
+          - script.wait: ruehrwerk
+          - text_sensor.template.publish:
+              id: info_spuelprogramm
+              state: !lambda 'return "Bereit";'
+
+
+# I²C konfigurieren
+i2c:
+  sda: D6
+  scl: D5
+
+
+# Text Sensor für Ausgabe
+text_sensor:
+  - platform: template
+    id: info_spuelprogramm
+    name: "Status"
+
+
+sensor:
+  # Absolute Luftfeuchtigkeit berechnen
+  - platform: absolute_humidity
+    name: Absolute Luftfeuchtigkeit
+    temperature: air_temperature
+    humidity: relative_humidity
+    
+  #  BME280:
+  - platform: bme280
+    temperature:
+      name: Temperatur
+      id: air_temperature
+    humidity:
+      name: Relative Luftfeuchtigkeit
+      id: relative_humidity
+    pressure:
+      name: Luftdruck
+      id: air_pressure
+    address: 0x76
+    update_interval: 60s  
+
+# Spültaster - gegen Minus schalten
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: D7
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    name: Spültaste
+    id: klo_spueltaste
+    filters:
+      - delayed_off: 10ms
+    on_double_click: #Taster: 2x schnell klicken -> Pipi spülen und Rührwerk (nacheinander)
+      min_length: 50ms
+      max_length: 500ms
+      then:
+        - delay: 1s
+        - script.execute: spuelpumpe
+        - script.wait: spuelpumpe
+        - script.execute: ruehrwerk
+        - script.wait: ruehrwerk        
+    on_click: #Taster: 1x klicken -> nur Pipi; 1x drücken -> nur Kaka; lange drücken für Wartungsprogramm
+    - min_length: 50ms
+      max_length: 500ms
+      then:
+        - delay: 1s
+        - script.execute: spuelpumpe
+        - script.wait: spuelpumpe
+    - min_length: 500ms 
+      max_length: 5s
+      then:
+        - delay: 1s
+        - script.execute: ruehrwerk
+        - script.wait: ruehrwerk        
+    - min_length: 5s
+      max_length: 20s
+      then:
+        - delay: 1s
+        - script.execute: ruehrwerk_wartung
+        - script.wait: ruehrwerk_wartung        
+
+
+#Relaiskonfiguration
+switch:
+  - platform: gpio
+    pin: 
+      number: GPIO1
+      inverted: true
+    name: "Relais Motor links Minus"
+    id: relais_motor_links_minus
+  - platform: gpio
+    pin: 
+      number: GPIO3
+      inverted: true
+    name: "Relais Motor links Plus"
+    id: relais_motor_links_plus
+  - platform: gpio
+    pin: 
+      number: GPIO5
+      inverted: true
+    name: "Relais Motor rechts Minus"
+    id: relais_motor_rechts_minus
+  - platform: gpio
+    pin: 
+      number: GPIO4
+      inverted: true
+    name: "Relais Motor rechts Plus"
+    id: relais_motor_rechts_plus
+  - platform: gpio
+    pin: 
+      number: GPIO0
+      inverted: true
+    name: "Relais Spülpumpe"
+    id: relais_spuelpumpe    
+    
+
+# verschiedene Funktionalitäten      
+script:
+  - id: spuelpumpe
+    mode: single
+    then:
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Pipi wird gespült";'
+      - switch.turn_on: relais_spuelpumpe
+      - delay: 2s # Spülzeit 
+      - switch.turn_off: relais_spuelpumpe
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Bereit";'
+ 
+  - id: ruehrwerk
+    mode: single
+    then:
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Kacke wird gequirlt";'      
+        # Vorwärts rühren
+      - script.execute: ruehr_vor
+      - delay: 50s # Rührzeit
+        # Rückwärts rühren
+      - script.execute: ruehr_zur
+      - delay: 25s # Rührzeit
+        # Rühren stoppen
+      - script.execute: ruehr_stop
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Bereit";'
+
+  - id: ruehrwerk_wartung
+    mode: single
+    then:
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Kacke wird heftig gequirlt";'      
+        # Rückwärts rühren
+      - script.execute: ruehr_zur
+      - delay: 25s # Rührzeit
+        # nach links rühren
+      - script.execute: ruehr_li
+      - delay: 25s # Rührzeit
+        # Rückwärts rühren
+      - script.execute: ruehr_zur
+      - delay: 25s # Rührzeit
+        # nach rechts rühren
+      - script.execute: ruehr_re
+      - delay: 25s # Rührzeit
+        # Rückwärts rühren
+      - script.execute: ruehr_zur
+      - delay: 25s # Rührzeit
+        # Vorwärts rühren
+      - script.execute: ruehr_vor
+      - delay: 25s # Rührzeit
+        # Rückwärts rühren
+      - script.execute: ruehr_zur
+      - delay: 25s # Rührzeit
+        # Rühren stoppen
+      - script.execute: ruehr_stop
+      - text_sensor.template.publish:
+          id: info_spuelprogramm
+          state: !lambda 'return "Bereit";'
+
+  - id: mot_li_vor
+    mode: single
+    then:
+      - switch.turn_off: relais_motor_links_plus
+      - switch.turn_on: relais_motor_links_minus
+
+  - id: mot_re_vor
+    mode: single
+    then:
+      - switch.turn_off: relais_motor_rechts_plus
+      - switch.turn_on: relais_motor_rechts_minus
+
+  - id: mot_li_zur
+    mode: single
+    then:
+      - switch.turn_off: relais_motor_links_minus
+      - switch.turn_on: relais_motor_links_plus
+
+  - id: mot_re_zur
+    mode: single
+    then:
+      - switch.turn_off: relais_motor_rechts_minus
+      - switch.turn_on: relais_motor_rechts_plus
+
+  - id: ruehr_vor
+    mode: single
+    then: 
+      - script.execute: mot_li_vor
+      - script.execute: mot_re_vor
+
+  - id: ruehr_zur
+    mode: single
+    then: 
+      - script.execute: mot_li_zur
+      - script.execute: mot_re_zur
+
+  - id: ruehr_re
+    mode: single
+    then: 
+      - script.execute: mot_li_zur
+      - script.execute: mot_re_vor
+
+  - id: ruehr_li
+    mode: single
+    then: 
+      - script.execute: mot_li_vor
+      - script.execute: mot_re_zur
+
+  - id: ruehr_stop
+    mode: single
+    then: 
+      - switch.turn_off: relais_motor_rechts_plus
+      - switch.turn_off: relais_motor_rechts_minus
+      - switch.turn_off: relais_motor_links_plus
+      - switch.turn_off: relais_motor_links_minus
